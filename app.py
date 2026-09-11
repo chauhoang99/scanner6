@@ -6,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 
 # Page Configuration
-st.set_page_config(page_title="Three Soldiers Pattern Predictor", layout="wide")
+st.set_page_config(page_title="Three Soldiers at Key Levels", layout="wide")
 
 # Custom Styling
 st.markdown(
@@ -27,7 +27,7 @@ st.markdown(
 # ---------------------------------------------------------
 # SIDEBAR CONFIGURATION
 # ---------------------------------------------------------
-st.sidebar.header("Pattern Settings")
+st.sidebar.header("Key Level & Pattern Settings")
 
 ticker_options = [
     "EURUSD=X", "GBPUSD=X", "AUDUSD=X", "NZDUSD=X", "USDCAD=X",
@@ -43,6 +43,10 @@ symbol = st.sidebar.selectbox("Ticker Symbol", options=ticker_options, index=0)
 st.sidebar.subheader("Timeframe & History")
 timeframe = st.sidebar.selectbox("Timeframe", ["60m", "1d", "1wk", "1mo", "3mo"], index=1)
 history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=2)
+
+st.sidebar.subheader("Key Level Parameters")
+swing_window = st.sidebar.slider("Swing Lookback Window (Bars)", min_value=10, max_value=50, value=20, help="Lookback window used to identify local support and resistance swing levels.")
+proximity_pct = st.sidebar.slider("Proximity Tolerance (%)", min_value=0.1, max_value=3.0, value=1.0, step=0.1, help="Maximum percentage distance from a key level to be considered 'near'.")
 
 if st.sidebar.button("🔄 Run Analysis"):
     st.rerun()
@@ -62,10 +66,10 @@ def fetch_data(ticker, period, interval):
 
 
 # ---------------------------------------------------------
-# PATTERN DETECTION LOGIC
+# PATTERN & KEY LEVEL DETECTION LOGIC
 # ---------------------------------------------------------
-def analyze_three_soldiers(df, timeframe):
-    if df is None or len(df) < 5:
+def analyze_soldiers_at_key_levels(df, timeframe, swing_window, prox_tolerance):
+    if df is None or len(df) < swing_window + 5:
         return pd.DataFrame(), pd.DataFrame()
     
     work_df = df.copy()
@@ -75,8 +79,11 @@ def analyze_three_soldiers(df, timeframe):
     white_soldiers_instances = []
     black_soldiers_instances = []
     
-    # We need at least 3 candles for the pattern + 1 future candle to check continuation
-    for i in range(3, len(work_df) - 1):
+    # Calculate rolling swing highs (Resistance) and swing lows (Support)
+    work_df['Resistance'] = work_df['High'].rolling(window=swing_window).max()
+    work_df['Support'] = work_df['Low'].rolling(window=swing_window).min()
+    
+    for i in range(swing_window, len(work_df) - 1):
         c1_open = work_df["Open"].iloc[i-3]
         c1_close = work_df["Close"].iloc[i-3]
         
@@ -90,10 +97,19 @@ def analyze_three_soldiers(df, timeframe):
         next_close = work_df["Close"].iloc[i]
         next_date = work_df.index[i]
         
+        current_support = work_df['Support'].iloc[i-1]
+        current_resistance = work_df['Resistance'].iloc[i-1]
+        pattern_price = c3_close
+        
+        # Check proximity to support or resistance (within tolerance %)
+        dist_to_support = abs(pattern_price - current_support) / current_support * 100
+        dist_to_resistance = abs(pattern_price - current_resistance) / current_resistance * 100
+        
+        near_support = dist_to_support <= prox_tolerance
+        near_resistance = dist_to_resistance <= prox_tolerance
+        near_key_level = near_support or near_resistance
+        
         # --- THREE WHITE SOLDIERS ---
-        # 1. All three are green candles (Close > Open)
-        # 2. Each close is higher than the previous close
-        # 3. Each opens within or near the previous body (simplified as c2 opens > c1 open, c3 opens > c2 open or standard consecutive highs)
         is_white_soldiers = (
             (c1_close > c1_open) and 
             (c2_close > c2_open) and 
@@ -103,19 +119,17 @@ def analyze_three_soldiers(df, timeframe):
         )
         
         if is_white_soldiers:
-            # Check continuation: Did the next candle close higher than the 3rd soldier's close?
             continued = next_close > c3_close
             white_soldiers_instances.append({
                 "Date": next_date,
-                "Pattern": "Three White Soldiers",
-                3: c3_close,
+                "3rd Close": c3_close,
                 "Next Close": next_close,
+                "Near Key Level": near_key_level,
+                "Zone Type": "Support" if near_support else ("Resistance" if near_resistance else "None"),
                 "Continued": continued
             })
             
         # --- THREE BLACK SOLDIERS ---
-        # 1. All three are red candles (Close < Open)
-        # 2. Each close is lower than the previous close
         is_black_soldiers = (
             (c1_close < c1_open) and 
             (c2_close < c2_open) and 
@@ -125,13 +139,13 @@ def analyze_three_soldiers(df, timeframe):
         )
         
         if is_black_soldiers:
-            # Check continuation: Did the next candle close lower than the 3rd soldier's close?
             continued = next_close < c3_close
             black_soldiers_instances.append({
                 "Date": next_date,
-                "Pattern": "Three Black Soldiers",
                 "3rd Close": c3_close,
                 "Next Close": next_close,
+                "Near Key Level": near_key_level,
+                "Zone Type": "Support" if near_support else ("Resistance" if near_resistance else "None"),
                 "Continued": continued
             })
             
@@ -141,48 +155,56 @@ def analyze_three_soldiers(df, timeframe):
 # ---------------------------------------------------------
 # MAIN DASHBOARD UI
 # ---------------------------------------------------------
-st.title("🛡️ Three Soldiers Candlestick Pattern Analyzer")
-st.markdown(f"Tracking historical occurrences and continuation probabilities of **Three White Soldiers** and **Three Black Soldiers** for **{symbol}** on **{timeframe}**.")
+st.title("🛡️ Three Soldiers at Key Levels Analyzer")
+st.markdown(f"Tracking **Three White / Black Soldiers** formations near dynamic **Support & Resistance key levels** for **{symbol}** on **{timeframe}**.")
 
 df = fetch_data(symbol, history_period, timeframe)
 
 if df is None or df.empty:
     st.error(f"Could not retrieve data for ticker '{symbol}'.")
 else:
-    white_df, black_df = analyze_three_soldiers(df, timeframe)
+    white_df, black_df = analyze_soldiers_at_key_levels(df, timeframe, swing_window, proximity_pct)
     
     col1, col2 = st.columns(2)
     
-    # --- THREE WHITE SOLDIERS METRICS ---
+    # --- THREE WHITE SOLDIERS ---
     with col1:
         st.markdown("### 📈 Three White Soldiers (Bullish)")
         total_white = len(white_df)
         
         if total_white > 0:
-            continued_white = white_df["Continued"].sum()
-            white_prob = (continued_white / total_white) * 100
+            white_near_kl = white_df[white_df["Near Key Level"] == True]
+            total_white_kl = len(white_near_kl)
+            
+            overall_prob = (white_df["Continued"].sum() / total_white) * 100
+            kl_prob = (white_near_kl["Continued"].sum() / total_white_kl * 100) if total_white_kl > 0 else 0
             
             st.metric("Total Patterns Found", total_white)
-            st.metric("Continuation Probability (Next Candle Closes Higher)", f"{white_prob:.1f}%", f"{continued_white} / {total_white} times")
+            st.metric("Continuation Probability (Overall)", f"{overall_prob:.1f}%")
+            st.metric(f"Continuation Probability (Near Key Level ≤ {proximity_pct}%)", f"{kl_prob:.1f}%", f"{total_white_kl} occurrences")
             
             with st.expander("🔍 View White Soldiers History"):
                 st.dataframe(white_df.sort_values(by="Date", ascending=False), use_container_width=True, hide_index=True)
         else:
-            st.info("No Three White Soldiers patterns found in the selected history range.")
+            st.info("No Three White Soldiers patterns found.")
 
-    # --- THREE BLACK SOLDIERS METRICS ---
+    # --- THREE BLACK SOLDIERS ---
     with col2:
         st.markdown("### 📉 Three Black Soldiers (Bearish)")
         total_black = len(black_df)
         
         if total_black > 0:
-            continued_black = black_df["Continued"].sum()
-            black_prob = (continued_black / total_black) * 100
+            black_near_kl = black_df[black_df["Near Key Level"] == True]
+            total_black_kl = len(black_near_kl)
+            
+            overall_prob_b = (black_df["Continued"].sum() / total_black) * 100
+            kl_prob_b = (black_near_kl["Continued"].sum() / total_black_kl * 100) if total_black_kl > 0 else 0
             
             st.metric("Total Patterns Found", total_black)
-            st.metric("Continuation Probability (Next Candle Closes Lower)", f"{black_prob:.1f}%", f"{continued_black} / {total_black} times")
+            st.metric("Continuation Probability (Overall)", f"{overall_prob_b:.1f}%")
+            st.metric(f"Continuation Probability (Near Key Level ≤ {proximity_pct}%)", f"{kl_prob_b:.1f}%", f"{total_black_kl} occurrences")
             
             with st.expander("🔍 View Black Soldiers History"):
                 st.dataframe(black_df.sort_values(by="Date", ascending=False), use_container_width=True, hide_index=True)
         else:
-            st.info("No Three Black Soldiers patterns found in the selected history range.")
+            st.info("No Three Black Soldiers patterns found.")
